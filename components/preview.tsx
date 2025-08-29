@@ -112,7 +112,7 @@ export function Preview({
         {fragment && (
           <div className="overflow-y-auto w-full h-full">
             <TabsContent value="code" className="h-full">
-              {fragment.code && fragment.file_path && (
+              {fragment.code && fragment.file_path && typeof fragment.code === 'string' && (
                 <FragmentCode
                   files={[
                     {

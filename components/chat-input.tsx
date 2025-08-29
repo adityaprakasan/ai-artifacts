@@ -8,9 +8,18 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { DataPreview } from '@/components/data-preview'
 import { isFileInArray } from '@/lib/utils'
+import { 
+  parseCsvFile, 
+  parseExcelFile, 
+  validateDataFile, 
+  getDataSummary, 
+  ParsedDataset, 
+  DataSummary 
+} from '@/lib/data-utils'
 import { ArrowUp, Paperclip, Square, X } from 'lucide-react'
-import { SetStateAction, useEffect, useMemo, useState } from 'react'
+import { SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import TextareaAutosize from 'react-textarea-autosize'
 
 export function ChatInput({
@@ -26,6 +35,8 @@ export function ChatInput({
   isMultiModal,
   files,
   handleFileChange,
+  dataFiles,
+  handleDataFileChange,
   children,
 }: {
   retry: () => void
@@ -40,18 +51,85 @@ export function ChatInput({
   isMultiModal: boolean
   files: File[]
   handleFileChange: (change: SetStateAction<File[]>) => void
+  dataFiles?: { file: File; dataset: ParsedDataset; summary: DataSummary }[]
+  handleDataFileChange?: (change: SetStateAction<{ file: File; dataset: ParsedDataset; summary: DataSummary }[]>) => void
   children: React.ReactNode
 }) {
-  function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
-    handleFileChange((prev) => {
-      const newFiles = Array.from(e.target.files || [])
-      const uniqueFiles = newFiles.filter((file) => !isFileInArray(file, prev))
-      return [...prev, ...uniqueFiles]
-    })
+  const [isProcessingDataFile, setIsProcessingDataFile] = useState(false)
+  const imageUrlsRef = useRef<Map<File, string>>(new Map())
+
+  const isDataFile = (file: File) => {
+    const extension = file.name.toLowerCase()
+    return extension.endsWith('.csv') || extension.endsWith('.xls') || extension.endsWith('.xlsx')
+  }
+
+  const processDataFile = async (file: File) => {
+    if (!handleDataFileChange) return
+
+    setIsProcessingDataFile(true)
+    try {
+      const validation = validateDataFile(file)
+      if (!validation.isValid) {
+        throw new Error(validation.error)
+      }
+
+      let dataset: ParsedDataset
+      if (file.name.toLowerCase().endsWith('.csv')) {
+        dataset = await parseCsvFile(file)
+      } else {
+        dataset = await parseExcelFile(file)
+      }
+
+      const summary = getDataSummary(dataset)
+      
+      handleDataFileChange((prev) => {
+        // Check for duplicate files
+        if (prev.some(p => p.file.name === file.name && p.file.size === file.size)) {
+          return prev
+        }
+        return [
+          ...prev,
+          { file, dataset, summary }
+        ]
+      })
+    } catch (error) {
+      console.error('Error processing data file:', error)
+    } finally {
+      setIsProcessingDataFile(false)
+    }
+  }
+
+  async function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const newFiles = Array.from(e.target.files || [])
+    
+    for (const file of newFiles) {
+      if (isDataFile(file)) {
+        await processDataFile(file)
+      } else if (file.type.startsWith('image/')) {
+        handleFileChange((prev) => {
+          if (!isFileInArray(file, prev)) {
+            return [...prev, file]
+          }
+          return prev
+        })
+      }
+    }
   }
 
   function handleFileRemove(file: File) {
+    // Revoke object URL to prevent memory leak
+    const url = imageUrlsRef.current.get(file)
+    if (url) {
+      URL.revokeObjectURL(url)
+      imageUrlsRef.current.delete(file)
+    }
     handleFileChange((prev) => prev.filter((f) => f !== file))
+  }
+
+  function handleDataFileRemove(file: File) {
+    if (handleDataFileChange) {
+      handleDataFileChange((prev) => prev.filter((item) => item.file !== file))
+    }
   }
 
   function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -86,28 +164,36 @@ export function ChatInput({
     }
   }
 
-  function handleDrop(e: React.DragEvent) {
+  async function handleDrop(e: React.DragEvent) {
     e.preventDefault()
     e.stopPropagation()
     setDragActive(false)
 
-    const droppedFiles = Array.from(e.dataTransfer.files).filter((file) =>
-      file.type.startsWith('image/'),
-    )
+    const droppedFiles = Array.from(e.dataTransfer.files)
 
-    if (droppedFiles.length > 0) {
-      handleFileChange((prev) => {
-        const uniqueFiles = droppedFiles.filter(
-          (file) => !isFileInArray(file, prev),
-        )
-        return [...prev, ...uniqueFiles]
-      })
+    for (const file of droppedFiles) {
+      if (isDataFile(file)) {
+        await processDataFile(file)
+      } else if (file.type.startsWith('image/')) {
+        handleFileChange((prev) => {
+          if (!isFileInArray(file, prev)) {
+            return [...prev, file]
+          }
+          return prev
+        })
+      }
     }
   }
 
   const filePreview = useMemo(() => {
-    if (files.length === 0) return null
-    return Array.from(files).map((file) => {
+    const imageFiles = files.map((file) => {
+      // Get or create object URL, storing it in ref for cleanup
+      let url = imageUrlsRef.current.get(file)
+      if (!url) {
+        url = URL.createObjectURL(file)
+        imageUrlsRef.current.set(file, url)
+      }
+
       return (
         <div className="relative" key={file.name}>
           <span
@@ -117,14 +203,45 @@ export function ChatInput({
             <X className="h-3 w-3 cursor-pointer" />
           </span>
           <img
-            src={URL.createObjectURL(file)}
+            src={url}
             alt={file.name}
             className="rounded-xl w-10 h-10 object-cover"
           />
         </div>
       )
     })
-  }, [files])
+
+    const dataFilePreviews = dataFiles?.map((dataFile) => (
+      <div key={dataFile.file.name} className="w-full max-w-md">
+        <div className="relative">
+          <span
+            onClick={() => handleDataFileRemove(dataFile.file)}
+            className="absolute top-2 right-2 bg-muted rounded-full p-1 z-10"
+          >
+            <X className="h-3 w-3 cursor-pointer" />
+          </span>
+          <DataPreview
+            dataset={dataFile.dataset}
+            summary={dataFile.summary}
+            fileName={dataFile.file.name}
+            maxRows={3}
+            maxCols={3}
+          />
+        </div>
+      </div>
+    )) || []
+
+    if (imageFiles.length === 0 && dataFilePreviews.length === 0) return null
+    
+    return (
+      <div className="flex flex-col gap-2 w-full">
+        {imageFiles.length > 0 && (
+          <div className="flex gap-2">{imageFiles}</div>
+        )}
+        {dataFilePreviews}
+      </div>
+    )
+  }, [files, dataFiles])
 
   function onEnter(e: React.KeyboardEvent<HTMLFormElement>) {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -139,9 +256,25 @@ export function ChatInput({
 
   useEffect(() => {
     if (!isMultiModal) {
+      // Clean up all object URLs before clearing files
+      imageUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+      imageUrlsRef.current.clear()
+      
       handleFileChange([])
+      if (handleDataFileChange) {
+        handleDataFileChange([])
+      }
     }
-  }, [isMultiModal])
+  }, [isMultiModal, handleFileChange, handleDataFileChange])
+
+  // Cleanup effect for when component unmounts
+  useEffect(() => {
+    return () => {
+      // Clean up all object URLs on unmount
+      imageUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+      imageUrlsRef.current.clear()
+    }
+  }, [])
 
   return (
     <form
@@ -194,12 +327,22 @@ export function ChatInput({
             onChange={handleInputChange}
             onPaste={isMultiModal ? handlePaste : undefined}
           />
+          {isProcessingDataFile && (
+            <div className="px-3 py-2 text-sm text-muted-foreground border-t">
+              Processing data file...
+            </div>
+          )}
+          {filePreview && (
+            <div className="px-3 py-2 border-t">
+              {filePreview}
+            </div>
+          )}
           <div className="flex p-3 gap-2 items-center">
             <input
               type="file"
               id="multimodal"
               name="multimodal"
-              accept="image/*"
+              accept="image/*,.csv,.xls,.xlsx"
               multiple={true}
               className="hidden"
               onChange={handleFileInput}
@@ -225,7 +368,6 @@ export function ChatInput({
                   <TooltipContent>Add attachments</TooltipContent>
                 </Tooltip>
               </TooltipProvider>
-              {files.length > 0 && filePreview}
             </div>
             <div>
               {!isLoading ? (

@@ -9,7 +9,8 @@ import { ChatSettings } from '@/components/chat-settings'
 import { NavBar } from '@/components/navbar'
 import { Preview } from '@/components/preview'
 import { useAuth } from '@/lib/auth'
-import { Message, toAISDKMessages, toMessageImage } from '@/lib/messages'
+import { Message, toAISDKMessages, toMessageImage, toMessageData } from '@/lib/messages'
+import { ParsedDataset, DataSummary } from '@/lib/data-utils'
 import { LLMModelConfig } from '@/lib/models'
 import modelsList from '@/lib/models.json'
 import { FragmentSchema, fragmentSchema as schema } from '@/lib/schema'
@@ -19,15 +20,17 @@ import { ExecutionResult } from '@/lib/types'
 import { DeepPartial } from 'ai'
 import { experimental_useObject as useObject } from 'ai/react'
 import { usePostHog } from 'posthog-js/react'
-import { SetStateAction, useEffect, useState } from 'react'
+import { SetStateAction, useEffect, useState, useRef } from 'react'
 import { useLocalStorage } from 'usehooks-ts'
 
 export default function Home() {
   const [chatInput, setChatInput] = useLocalStorage('chat', '')
   const [files, setFiles] = useState<File[]>([])
+  const [dataFiles, setDataFiles] = useState<{ file: File; dataset: ParsedDataset; summary: DataSummary }[]>([])
   const [selectedTemplate, setSelectedTemplate] = useState<'auto' | TemplateId>(
     'auto',
   )
+  const currentRawFilesRef = useRef<{ fileName: string; contentBase64: string }[]>([])
   const [languageModel, setLanguageModel] = useLocalStorage<LLMModelConfig>(
     'languageModel',
     {
@@ -79,10 +82,18 @@ export default function Home() {
       if (!error) {
         // send it to /api/sandbox
         console.log('fragment', fragment)
+        console.log('currentRawFiles count:', currentRawFilesRef.current.length)
         setIsPreviewLoading(true)
         posthog.capture('fragment_generated', {
           template: fragment?.template,
         })
+
+        console.log('🪣 Sending to sandbox API...')
+        const sandboxStartTime = Date.now()
+
+        // Add timeout to sandbox request
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 120000) // 2 minute timeout
 
         const response = await fetch('/api/sandbox', {
           method: 'POST',
@@ -91,17 +102,30 @@ export default function Home() {
             userID: session?.user?.id,
             teamID: userTeam?.id,
             accessToken: session?.access_token,
+            rawFiles: currentRawFilesRef.current,
           }),
+          signal: controller.signal,
         })
 
+        clearTimeout(timeoutId)
         const result = await response.json()
+        const sandboxEndTime = Date.now()
+        console.log('✅ Sandbox completed in', sandboxEndTime - sandboxStartTime, 'ms')
         console.log('result', result)
+
+        if (!response.ok) {
+          throw new Error(`Sandbox API error: ${response.status} ${response.statusText}`)
+        }
         posthog.capture('sandbox_created', { url: result.url })
 
         setResult(result)
         setCurrentPreview({ fragment, result })
         setMessage({ result })
         setCurrentTab('fragment')
+        setIsPreviewLoading(false)
+      } else if (error) {
+        console.error('Sandbox error:', error)
+        setErrorMessage(error.message || 'Failed to create sandbox')
         setIsPreviewLoading(false)
       }
     },
@@ -112,7 +136,7 @@ export default function Home() {
       setFragment(object)
       const content: Message['content'] = [
         { type: 'text', text: object.commentary || '' },
-        { type: 'code', text: object.code || '' },
+        { type: 'code', text: typeof object.code === 'string' ? object.code : '' },
       ]
 
       if (!lastMessage || lastMessage.role !== 'assistant') {
@@ -168,10 +192,34 @@ export default function Home() {
       })
     }
 
+    if (dataFiles.length > 0) {
+      dataFiles.forEach((dataFile) => {
+        const messageData = toMessageData(dataFile.file, dataFile.dataset, dataFile.summary)
+        content.push(messageData)
+      })
+    }
+
     const updatedMessages = addMessage({
       role: 'user',
       content,
     })
+
+    // Prepare raw file data for transfer to sandbox
+    let rawFiles
+    if (dataFiles.length > 0) {
+      rawFiles = await Promise.all(
+        dataFiles.map(async (dataFile) => {
+          const fileBase64 = Buffer.from(await dataFile.file.arrayBuffer()).toString('base64')
+          return {
+            fileName: dataFile.file.name,
+            contentBase64: fileBase64,
+          }
+        })
+      )
+    }
+
+    // Store rawFiles for use in sandbox API call
+    currentRawFilesRef.current = rawFiles || []
 
     submit({
       userID: session?.user?.id,
@@ -180,10 +228,13 @@ export default function Home() {
       template: currentTemplate,
       model: currentModel,
       config: languageModel,
+      rawFiles,
     })
 
     setChatInput('')
     setFiles([])
+    setDataFiles([])
+    currentRawFilesRef.current = []
     setCurrentTab('code')
 
     posthog.capture('chat_submit', {
@@ -216,6 +267,10 @@ export default function Home() {
     setFiles(change)
   }
 
+  function handleDataFileChange(change: SetStateAction<{ file: File; dataset: ParsedDataset; summary: DataSummary }[]>) {
+    setDataFiles(change)
+  }
+
   function logout() {
     supabase
       ? supabase.auth.signOut()
@@ -242,6 +297,8 @@ export default function Home() {
     stop()
     setChatInput('')
     setFiles([])
+    setDataFiles([])
+    currentRawFilesRef.current = []
     setMessages([])
     setFragment(undefined)
     setResult(undefined)
@@ -304,6 +361,8 @@ export default function Home() {
             isMultiModal={currentModel?.multiModal || false}
             files={files}
             handleFileChange={handleFileChange}
+            dataFiles={dataFiles}
+            handleDataFileChange={handleDataFileChange}
           >
             <ChatPicker
               templates={templates}

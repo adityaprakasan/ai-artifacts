@@ -27,6 +27,7 @@ export async function POST(req: Request) {
     template,
     model,
     config,
+    rawFiles,
   }: {
     messages: CoreMessage[]
     userID: string | undefined
@@ -34,6 +35,7 @@ export async function POST(req: Request) {
     template: Templates
     model: LLMModel
     config: LLMModelConfig
+    rawFiles?: { fileName: string; contentBase64: string }[]
   } = await req.json()
 
   const limit = !config.apiKey
@@ -57,24 +59,49 @@ export async function POST(req: Request) {
 
   console.log('userID', userID)
   console.log('teamID', teamID)
-  // console.log('template', template)
+  console.log('template', template)
   console.log('model', model)
-  // console.log('config', config)
+  console.log('config', config)
+  console.log('rawFiles count:', rawFiles?.length || 0)
 
   const { model: modelNameString, apiKey: modelApiKey, ...modelParams } = config
+  console.log('🔧 Getting model client...')
   const modelClient = getModelClient(model, config)
+  console.log('✅ Model client created:', modelClient)
 
   try {
-    const stream = await streamObject({
+    console.log('📝 Generating system prompt...')
+    const systemPrompt = toPrompt(template)
+    console.log('✅ System prompt generated, length:', systemPrompt.length)
+
+    console.log('🔄 Calling streamObject...')
+    const startTime = Date.now()
+
+    // Add timeout to prevent hanging
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Request timeout after 60 seconds')), 60000)
+    })
+
+    const streamPromise = streamObject({
       model: modelClient as LanguageModel,
       schema,
-      system: toPrompt(template),
+      system: systemPrompt,
       messages,
       maxRetries: 0, // do not retry on errors
       ...modelParams,
     })
 
-    return stream.toTextStreamResponse()
+    const stream = await Promise.race([streamPromise, timeoutPromise]) as any
+    const endTime = Date.now()
+    console.log('✅ streamObject completed in', endTime - startTime, 'ms')
+
+    console.log('📤 Converting to text stream response...')
+    const responseStartTime = Date.now()
+    const response = stream.toTextStreamResponse()
+    const responseEndTime = Date.now()
+    console.log('✅ Response created in', responseEndTime - responseStartTime, 'ms')
+
+    return response
   } catch (error: any) {
     const isRateLimitError =
       error && (error.statusCode === 429 || error.message.includes('limit'))
@@ -111,6 +138,16 @@ export async function POST(req: Request) {
     }
 
     console.error('Error:', error)
+
+    // Check for timeout error
+    if (error.message && error.message.includes('timeout')) {
+      return new Response(
+        'The request timed out. The AI model took too long to respond. Please try again with a simpler query or different model.',
+        {
+          status: 408, // Request Timeout
+        },
+      )
+    }
 
     return new Response(
       'An unexpected error has occurred. Please try again later.',

@@ -1,0 +1,18 @@
+# This is a config for E2B sandbox template for Python Data Analysis
+# You can use 'template_name' (code-interpreter-v1) from this config to spawn a sandbox
+
+# Python SDK
+# from e2b import Sandbox
+# sandbox = Sandbox(template='code-interpreter-v1')
+
+# JS SDK
+# import { Sandbox } from 'e2b'
+# const sandbox = await Sandbox.create({ template: 'code-interpreter-v1' })
+
+template_name = "code-interpreter-v1"
+dockerfile = "e2b.Dockerfile"
+start_cmd = "python /home/user/script.py"
+cpu_count = 4
+memory_mb = 4_096
+team_id = "460355b3-4f64-48f9-9a16-4442817f79f5"
+# template_id will be generated when the template is built

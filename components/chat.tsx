@@ -1,6 +1,7 @@
 import { Message } from '@/lib/messages'
 import { FragmentSchema } from '@/lib/schema'
 import { ExecutionResult } from '@/lib/types'
+import { DataPreview } from '@/components/data-preview'
 import { DeepPartial } from 'ai'
 import { LoaderIcon, Terminal } from 'lucide-react'
 import { useEffect } from 'react'
@@ -36,7 +37,14 @@ export function Chat({
         >
           {message.content.map((content, id) => {
             if (content.type === 'text') {
-              return content.text
+              return <span key={id}>{content.text}</span>
+            }
+            if (content.type === 'code') {
+              return (
+                <pre key={id} className="bg-muted p-4 rounded-lg overflow-x-auto">
+                  <code>{content.text}</code>
+                </pre>
+              )
             }
             if (content.type === 'image') {
               return (
@@ -48,6 +56,24 @@ export function Chat({
                 />
               )
             }
+            if (content.type === 'data') {
+              return (
+                <div key={id} className="w-full max-w-md mb-2">
+                  <DataPreview
+                    dataset={{ columns: content.summary.columns, rows: content.preview }}
+                    summary={{ 
+                      rowCount: content.summary.rows, 
+                      columnCount: content.summary.columns.length,
+                      columnTypes: {}
+                    }}
+                    fileName={content.fileName}
+                    maxRows={5}
+                    maxCols={4}
+                  />
+                </div>
+              )
+            }
+            return null
           })}
           {message.object && (
             <div
